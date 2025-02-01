@@ -1,0 +1,11 @@
+# Python Cache Files
+__pycache__
+*.pyc
+*.pyo
+
+# uv
+/.venv
+/uv.lock
+
+# Editor Files
+/.vscode
