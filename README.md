@@ -7,6 +7,9 @@ the **pure Python web framework.** It allows you to schedule Python functions to
 run periodically, with the scheduler handling exceptions and rescheduling jobs
 as needed.
 
+> ⚠️ Rio extensions are currently experimental. You'll need Rio version 0.11 or
+> later and use internal APIs to add this extension to your app.
+
 This extension is designed to be easy to use and robust, while also allowing you
 to schedule jobs with arbitrarily fancy logic.
 
@@ -35,7 +38,6 @@ from datetime import timedelta
 import rio
 import rio_jobs
 
-
 # Regular code to create your Rio app
 class MyRoot(rio.Component):
     def build(self) -> rio.Component:
@@ -43,7 +45,6 @@ class MyRoot(rio.Component):
             "Hello, world!",
             justify="center",
         )
-
 
 # Create a function for the scheduler to run. This function can by synchronous
 # or asynchronous.
@@ -62,7 +63,6 @@ async def my_job() -> timedelta:
     # interval.
     return timedelta(hours=3)
 
-
 # Create a scheduler and queue the job
 scheduler = rio_jobs.JobScheduler()
 
@@ -71,7 +71,6 @@ scheduler.schedule(
     interval=timedelta(hours=1),
 )
 
-
 # Pass the scheduler to the Rio app. Since Rio's extension interface isn't
 # stable yet, we'll add the extension manually after the app has been created.
 app = rio.App(
@@ -79,7 +78,6 @@ app = rio.App(
 )
 
 app._add_extension(scheduler)
-
 
 # Run your Rio app as usual. If you want to use `rio run`, remove this line
 app.run_in_browser()
