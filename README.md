@@ -38,7 +38,8 @@ from datetime import timedelta
 import rio
 import rio_jobs
 
-# Regular code to create your Rio app
+# Regular code to create your Rio app. This one is just an example that displays
+# a static text.
 class MyRoot(rio.Component):
     def build(self) -> rio.Component:
         return rio.Text(
@@ -46,8 +47,16 @@ class MyRoot(rio.Component):
             justify="center",
         )
 
+
+# Create a scheduler
+scheduler = rio_jobs.JobScheduler()
+
 # Create a function for the scheduler to run. This function can by synchronous
-# or asynchronous.
+# or asynchronous. The `@scheduler.job` decorator adds the function to the
+# scheduler.
+@scheduler.job(
+    timedelta(hours=1),
+)
 async def my_job() -> timedelta:
     # Do some work here
     print('Working hard!')
@@ -62,14 +71,6 @@ async def my_job() -> timedelta:
     # ... or simply return nothing to keep running the job at the configured
     # interval.
     return timedelta(hours=3)
-
-# Create a scheduler and queue the job
-scheduler = rio_jobs.JobScheduler()
-
-scheduler.schedule(
-    my_job,
-    interval=timedelta(hours=1),
-)
 
 # Pass the scheduler to the Rio app. Since Rio's extension interface isn't
 # stable yet, we'll add the extension manually after the app has been created.
@@ -94,17 +95,13 @@ interval.
 Create a `JobScheduler` object to manage your jobs. This object takes no
 parameters and can be added to your app
 
-### `def JobScheduler.schedule(...)`
+### `JobScheduler.job(...)`
 
-This function allows you to schedule a job to run periodically. It ensures that
-the job will continue to be scheduled even if it fails, by catching and logging
-exceptions.
-
-Returns the scheduler object, for easy chaining.
+This is a decorator that allows you to schedule a job to run periodically. It
+ensures that the job will continue to be scheduled even if it fails, by catching
+and logging exceptions.
 
 **Parameters:**
-
-- `job`: The function to run.
 
 - `interval`: How often to run the job. If the job returns a time or timedelta,
   that will be used for the next run instead.
@@ -125,3 +122,12 @@ The job can optionally return a result:
 - `datetime`: Explicit time to run the job again
 - `timedelta`: How long to wait before running the job again
 - `"never"`: The job will be unscheduled and never run again
+
+### `JobScheduler.add_job(...)`
+
+A non-decorator version of `JobScheduler.job`. It works the same way as
+`JobScheduler.job`, but with alternate syntax, if you prefer to avoid
+decorators.
+
+This function takes the function to schedule as the first argument, followed by
+the same arguments as `JobScheduler.job`.

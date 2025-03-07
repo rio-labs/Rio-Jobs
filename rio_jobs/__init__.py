@@ -34,6 +34,7 @@ JobFunction: t.TypeAlias = t.Callable[
     | t.Awaitable[None | datetime | timedelta | t.Literal["never"],],
 ]
 
+J = t.TypeVar("J", bound=JobFunction)
 
 _logger = logging.getLogger(__name__)
 
@@ -126,7 +127,7 @@ class JobScheduler(rio.Extension):
         # Whether the app has already started
         self._is_running = False
 
-    def schedule(
+    def add_job(
         self,
         job: JobFunction,
         interval: timedelta,
@@ -140,9 +141,9 @@ class JobScheduler(rio.Extension):
 
         Schedules `job` to be called every `interval`. This function takes care
         not to crash, even if the job fails. Exceptions are caught, logged and
-        the job will be scheduled again in the future. Runs are not overlapping
-        - the next run will only start after the previous one has finished, plus
-        the configured interval.
+        the job will be scheduled again in the future. Runs are not overlapping,
+        meaning the next run will only start after the previous one has
+        finished, plus the configured interval.
 
         If `wait_for_initial_interval` is `True`, the job will wait for
         `interval` before being called for the first time. If `False`, it will
@@ -162,6 +163,9 @@ class JobScheduler(rio.Extension):
         unscheduled and never runs again.
 
         Returns the scheduler object, for easy chaining.
+
+        Note: A decorator version of this function is available as
+            `JobScheduler.job`.
 
         ## Parameters
 
@@ -206,9 +210,7 @@ class JobScheduler(rio.Extension):
             )
 
         if not isinstance(soft_start, bool):
-            raise ValueError(
-                f"`soft_start` should be a boolean, not {soft_start}"
-            )
+            raise ValueError(f"`soft_start` should be a boolean, not {soft_start}")
 
         # Get a name
         if name is None:
@@ -231,6 +233,77 @@ class JobScheduler(rio.Extension):
         # Return self for chaining
         return self
 
+    def job(
+        self,
+        interval: timedelta,
+        *,
+        name: str | None = None,
+        wait_for_initial_interval: bool = True,
+        soft_start: bool = True,
+    ) -> t.Callable[[J], J]:
+        """
+        Schedules a job to run periodically.
+
+        Schedules `job` to be called every `interval`. This function takes care
+        not to crash, even if the job fails. Exceptions are caught, logged and
+        the job will be scheduled again in the future. Runs are not overlapping,
+        meaning the next run will only start after the previous one has
+        finished, plus the configured interval.
+
+        If `wait_for_initial_interval` is `True`, the job will wait for
+        `interval` before being called for the first time. If `False`, it will
+        be run immediately instead, and the interval only starts counting after
+        that.
+
+        When an app starts for the first time, many jobs can be scheduled to run
+        simultaneously. This can lead to undue load spikes on the system. If
+        `soft_start` is `True`, the jobs will be rolled out over time, with a
+        few seconds of delay between each.
+
+        The job may optionally return a result. If it returns a `datetime`, that
+        time will be taken as the next time to run the job. If it returns a
+        `timedelta` it will be used as the next interval (though subsequent runs
+        will still use the default interval, unless they also return a
+        `timedelta`). If it returns the string `"never"`, the job will be
+        unscheduled and never runs again.
+
+        Note: A non-decorator version of this function is available as
+            `JobScheduler.add_job`.
+
+        ## Parameters
+
+        `interval`: How often to run the job. If the job returns a time or
+            timedelta, that will be used for the next run instead, before
+            returning to this interval.
+
+        `name`: An optional name for the job. This can help with debugging and
+            deciphering logs.
+
+        `wait_for_initial_interval`: Whether the job should wait for the
+            interval duration before running for the first time. If `False`, it
+            will run immediately instead, and the interval only starts counting
+            after that.
+
+        `soft_start`: Whether the job should be staggered to avoid a load spike
+            at the app's start.
+
+        ## Raises
+
+        `ValueError`: If `interval` is less than or equal to zero.
+        """
+
+        def decorator(job_function: J) -> J:
+            self.add_job(
+                job_function,
+                interval,
+                name=name,
+                wait_for_initial_interval=wait_for_initial_interval,
+                soft_start=soft_start,
+            )
+            return job_function
+
+        return decorator
+
     @rio.extension_event.on_app_start
     async def _on_app_start(
         self,
@@ -239,9 +312,9 @@ class JobScheduler(rio.Extension):
         """
         Schedule all jobs when the app starts.
         """
-        assert (
-            not self._is_running
-        ), "Called on app start, but the extension is already running!?"
+        assert not self._is_running, (
+            "Called on app start, but the extension is already running!?"
+        )
         self._is_running = True
 
         # Allow the code below to assume there's at least one job
@@ -344,19 +417,13 @@ class JobScheduler(rio.Extension):
             run_at = run_at.astimezone(timezone.utc)
 
         # Create the task
-        self._job_workers.append(
-            asyncio.create_task(self._job_worker(job, run_at))
-        )
+        self._job_workers.append(asyncio.create_task(self._job_worker(job, run_at)))
 
         # Log what happened
         if run_at <= now:
-            _logger.debug(
-                f'Job "{job.name}" has been scheduled to run immediately.'
-            )
+            _logger.debug(f'Job "{job.name}" has been scheduled to run immediately.')
         else:
-            _logger.debug(
-                f'Job "{job.name}" has been scheduled to run at {run_at}.'
-            )
+            _logger.debug(f'Job "{job.name}" has been scheduled to run at {run_at}.')
 
     async def _wait_until(
         self,
@@ -445,9 +512,7 @@ class JobScheduler(rio.Extension):
                 return
 
             except Exception:
-                _logger.exception(
-                    f'Job "{job.name}" has crashed. Rescheduling.'
-                )
+                _logger.exception(f'Job "{job.name}" has crashed. Rescheduling.')
                 result = None
 
             # How long did the run take?
