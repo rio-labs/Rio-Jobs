@@ -11,6 +11,7 @@ import dataclasses
 import inspect
 import logging
 import time
+import revel
 import typing as t
 from datetime import datetime, timedelta, timezone
 
@@ -35,6 +36,15 @@ JobFunction: t.TypeAlias = t.Callable[
 ]
 
 J = t.TypeVar("J", bound=JobFunction)
+
+
+LogLevel = t.Literal[
+    "debug",
+    "info",
+    "warning",
+    "error",
+    "critical",
+]
 
 _logger = logging.getLogger(__name__)
 
@@ -82,6 +92,124 @@ async def _call_sync_or_async_function(
 
 
 @dataclasses.dataclass
+class Run:
+    """
+    A past or current run of a job.
+    """
+
+    # When the job was started. Always has a timezone set.
+    started_at: datetime
+
+    # When the job was finished. Always has a timezone set. This is `None` if
+    # the job is still running.
+    finished_at: datetime | None
+
+    # All messages logged to this run
+    log_messages: list[tuple[datetime, LogLevel, str]]
+
+    # The result of the job, or, if the job failed, the raised exception. This
+    # is `None` if the job is still running.
+    result: datetime | timedelta | t.Literal["never"] | None | BaseException
+
+    @property
+    def is_running(self) -> bool:
+        """
+        Whether the job is still running.
+
+        Returns `True` if the job is still in progress and `False` otherwise.
+        """
+        return self.finished_at is None
+
+    @property
+    def has_succeeded(self) -> bool:
+        """
+        Whether the job completed successfully.
+
+        Returns `True` if the job has finished and did not raise an exception
+        and `False` otherwise.
+        """
+        return self.finished_at is not None and not isinstance(
+            self.result, BaseException
+        )
+
+    @property
+    def has_failed(self) -> bool:
+        """
+        Whether the job has failed.
+
+        Returns `True` if the job has finished and raised an exception and
+        `False` otherwise.
+        """
+        return self.finished_at is not None and isinstance(self.result, BaseException)
+
+    def log(self, level: LogLevel, message: str) -> None:
+        """
+        Logs a message to the job's run.
+
+        This is similar to `logging.log`, but the message is stored with the
+        job's run. This allows you to inspect the log messages of a job after
+        it has run.
+        """
+        self.log_messages.append(
+            (
+                datetime.now(timezone.utc),
+                level,
+                message,
+            )
+        )
+
+    def debug(self, message: str) -> None:
+        """
+        Logs a debug message to the job's run.
+
+        This is similar to `logging.debug`, but the message is stored with the
+        job's run. This allows you to inspect the log messages of a job after
+        it has run.
+        """
+        self.log("debug", message)
+
+    def info(self, message: str) -> None:
+        """
+        Logs an info message to the job's run.
+
+        This is similar to `logging.info`, but the message is stored with the
+        job's run. This allows you to inspect the log messages of a job after
+        it has run.
+        """
+        self.log("info", message)
+
+    def warning(self, message: str) -> None:
+        """
+        Logs a warning message to the job's run.
+
+        This is similar to `logging.warning`, but the message is stored with the
+        job's run. This allows you to inspect the log messages of a job after
+        it has run.
+        """
+        self.log("warning", message)
+
+    def error(self, message: str) -> None:
+        """
+        Logs an error message to the job's run.
+
+        This is similar to `logging.error`, but the message is stored with the
+        job's run. This allows you to inspect the log messages of a job after
+        it has run.
+        """
+        self.log("error", message)
+
+    def critical(self, message: str) -> None:
+        """
+        Logs a critical message to the job's run.
+
+        This is similar to `logging.critical`, but the message is stored with
+        the job's run. This allows you to inspect the log messages of a job
+        after it has run.
+        """
+        self.log("critical", message)
+
+
+@dataclasses.dataclass
 class ScheduledJob:
     """
     A job that has been scheduled.
@@ -104,6 +232,19 @@ class ScheduledJob:
     # start
     soft_start: bool
 
+    # Tracks past runs. All jobs in here have returned, either successfully or
+    # with an exception. In-flight jobs are not tracked.
+    #
+    # Older runs are at the start of the list, newer runs at the end.
+    past_runs: list[Run]
+
+    # The next time the job is due to run
+    _next_run_at: datetime | t.Literal["never"]
+
+    # If the scheduler is running, this is the asyncio task driving this
+    # particular job
+    _task: asyncio.Task | None
+
 
 class JobScheduler(rio.Extension):
     """
@@ -114,15 +255,43 @@ class JobScheduler(rio.Extension):
     easy and guards against crashes.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        keep_past_runs_for: timedelta = timedelta(days=1),
+        keep_past_n_runs: int = 10,
+    ) -> None:
+        """
+        Creates a new job scheduler.
+
+        Creates a new scheduler for background jobs in your Rio app. Jobs can be
+        scheduled to run periodically, with the scheduler taking care of
+        catching exceptions and rescheduling the job for the future.
+
+        The scheduler will keep track of past and current runs so they can be
+        inspected for debugging and monitoring. (TODO: There is no public API
+        for this yet.)
+
+        ## Parameters
+
+        `keep_past_runs_for`: All jobs will be kept in memory for at least this
+            long so they can be inspected.
+
+        `keep_past_n_runs`: How many runs of each job to keep in memory,
+            regardless of how long ago they happened. This is useful for
+            debugging and monitoring.
+        """
+
         # Chain up
         super().__init__()
 
-        # Stores all scheduled jobs
-        self._job_objects: t.List[ScheduledJob] = []
+        # These control for how long past runs are kept, so they can be
+        # inspected e.g. in an admin interface.
+        self._keep_past_runs_for = keep_past_runs_for
+        self._keep_past_n_runs = keep_past_n_runs
 
-        # The asyncio jobs handling the scheduled jobs
-        self._job_workers: t.List[asyncio.Task[None]] = []
+        # Stores all scheduled jobs
+        self._job_objects: list[ScheduledJob] = []
 
         # Whether the app has already started
         self._is_running = False
@@ -223,6 +392,11 @@ class JobScheduler(rio.Extension):
             name=name,
             wait_for_initial_interval=wait_for_initial_interval,
             soft_start=soft_start,
+            past_runs=[],
+            # Initialize the next run time with a dummy value. This will be
+            # overwritten when the task for it is created.
+            _next_run_at=datetime(1970, 1, 1, tzinfo=timezone.utc),
+            _task=None,
         )
         self._job_objects.append(job_object)
 
@@ -312,6 +486,7 @@ class JobScheduler(rio.Extension):
         """
         Schedule all jobs when the app starts.
         """
+        revel.debug("On app start")
         assert not self._is_running, (
             "Called on app start, but the extension is already running!?"
         )
@@ -322,10 +497,10 @@ class JobScheduler(rio.Extension):
             return
 
         # Come up with a game plan for when to start all jobs without causing
-        # a load spike.
+        # an undue load spike.
         #
         # All jobs that don't allow for a soft start are easy - run them now.
-        soft_start_jobs: t.List[tuple[ScheduledJob, datetime]] = []
+        soft_start_jobs: list[tuple[ScheduledJob, datetime]] = []
         now = datetime.now(timezone.utc)
 
         for job in self._job_objects:
@@ -363,7 +538,7 @@ class JobScheduler(rio.Extension):
 
             cur_job_start_time = max(
                 cur_job_start_time,
-                prev_job_start_time + timedelta(seconds=10),
+                prev_job_start_time + timedelta(seconds=30),
             )
 
             prev_job_start_time = cur_job_start_time
@@ -374,10 +549,8 @@ class JobScheduler(rio.Extension):
             )
 
         # Done
-        assert len(self._job_workers) == len(self._job_objects), (
-            len(self._job_workers),
-            len(self._job_objects),
-        )
+        for job in self._job_objects:
+            assert job._task is not None, job
 
     @rio.extension_event.on_app_close
     async def _on_app_close(
@@ -387,12 +560,19 @@ class JobScheduler(rio.Extension):
         """
         Shut down all jobs when the app closes.
         """
+        revel.debug("On app close 1")
+
         # Cancel all jobs
-        for job_worker in self._job_workers:
-            job_worker.cancel()
+        for job in self._job_objects:
+            if job._task is not None:
+                job._task.cancel()
 
         # Wait for them to finish
-        await asyncio.gather(*self._job_workers, return_exceptions=True)
+        await asyncio.gather(
+            *[job._task for job in self._job_objects if job._task is not None],
+            return_exceptions=True,
+        )
+        revel.debug("On app close 2")
 
     def _create_asyncio_task_for_job(
         self,
@@ -405,6 +585,8 @@ class JobScheduler(rio.Extension):
         point in time for the first run. If `run_at` is `None`, the job will be
         wait for its initial interval (if configured to do so) before running.
         """
+        assert job._task is None, job
+
         # When to run?
         now = datetime.now(timezone.utc)
 
@@ -416,14 +598,17 @@ class JobScheduler(rio.Extension):
         else:
             run_at = run_at.astimezone(timezone.utc)
 
-        # Create the task
-        self._job_workers.append(asyncio.create_task(self._job_worker(job, run_at)))
+        # Store the time the job will next run in the job itself
+        job._next_run_at = run_at
 
-        # Log what happened
+        # Log what's going on
         if run_at <= now:
             _logger.debug(f'Job "{job.name}" has been scheduled to run immediately.')
         else:
             _logger.debug(f'Job "{job.name}" has been scheduled to run at {run_at}.')
+
+        # Create the task
+        job._task = asyncio.create_task(self._job_worker(job))
 
     async def _wait_until(
         self,
@@ -484,62 +669,103 @@ class JobScheduler(rio.Extension):
         )
         return now + job.interval
 
+    def _limit_past_runs_inplace(self, runs: list[Run]) -> None:
+        """
+        Cuts down the list of past runs to the configured maximum.
+        """
+
+        # Prepare a threshold value
+        drop_older_than = datetime.now(timezone.utc) - self._keep_past_runs_for
+
+        # Filter out old runs
+        #
+        # Skip the most recent runs, as they are supposed to be kept. This
+        # assumes that the list is sorted from oldest to newest.
+        ii = 0
+        while ii < len(runs) - self._keep_past_n_runs:
+            run = runs[ii]
+
+            # Too young?
+            if run.started_at > drop_older_than:
+                ii += 1
+                continue
+
+            # Drop it
+            del runs[ii]
+
     async def _job_worker(
         self,
         job: ScheduledJob,
-        next_run_at: datetime,
     ) -> None:
         """
         Wrapper that handles the safe running of a job.
         """
+        assert isinstance(job._next_run_at, datetime), job._next_run_at
 
         while True:
             # Wait until it's time to run the job
-            await self._wait_until(next_run_at)
+            await self._wait_until(job._next_run_at)
 
             _logger.debug(f'Running job "{job.name}"')
 
             # Run it, taking care not to crash
             started_at = time.monotonic()
+
+            run = Run(
+                started_at=datetime.now(timezone.utc),
+                finished_at=None,
+                log_messages=[],
+                result=None,
+            )
+            job.past_runs.append(run)
+
             try:
                 result = await _call_sync_or_async_function(job.callback)
 
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as err:
+                job._next_run_at = "never"
+                run.result = err
+
                 _logger.debug(
                     f'Job "{job.name}" has been unscheduled due to cancellation. (Raised `asyncio.CancelledError`)'
                 )
-
                 return
 
-            except Exception:
+            except Exception as err:
                 _logger.exception(f'Job "{job.name}" has crashed. Rescheduling.')
+                run.result = err
                 result = None
+            else:
+                run.result = result
 
             # How long did the run take?
             finished_at = time.monotonic()
             run_duration = timedelta(seconds=finished_at - started_at)
             _logger.debug(f'Job "{job.name}" has completed in {run_duration}.')
 
+            # Update the run
+            run.finished_at = run.started_at + run_duration
+
+            # Don't let the list of past runs get too long
+            self._limit_past_runs_inplace(job.past_runs)
+
             # When should it run next?
             now = datetime.now(timezone.utc)
-            next_run_at_or_never = self._get_next_run_time(job, result)
+            job._next_run_at = self._get_next_run_time(job, result)
 
             # Killjoy?
-            if next_run_at_or_never == "never":
+            if job._next_run_at == "never":
                 _logger.debug(
                     f'Job "{job.name}" has been unscheduled due to returning "never".'
                 )
 
                 return
 
-            if next_run_at_or_never < now:
+            if job._next_run_at < now:
                 _logger.debug(
                     f'Job "{job.name}" has returned a time in the past. It will be scheduled to run again as soon as possible.'
                 )
             else:
                 _logger.debug(
-                    f'Job "{job.name}" has been scheduled to run at {next_run_at_or_never}.'
+                    f'Job "{job.name}" has been scheduled to run at {job._next_run_at}.'
                 )
-
-            # Update the next run time
-            next_run_at = next_run_at_or_never
