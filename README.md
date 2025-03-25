@@ -57,7 +57,7 @@ scheduler = rio_jobs.JobScheduler()
 @scheduler.job(
     timedelta(hours=1),
 )
-async def my_job() -> timedelta:
+async def my_job(run: rio_jobs.Run) -> timedelta:
     # Do some work here
     print('Working hard!')
     await asyncio.sleep(100)
@@ -131,3 +131,22 @@ decorators.
 
 This function takes the function to schedule as the first argument, followed by
 the same arguments as `JobScheduler.job`.
+
+### `class Run`
+
+This object is passed to the job function as the first and only argument. It
+contains information about this particular run of the job, such as the time it
+started, the jobs progress and similar.
+
+**Attributes:**
+
+- `started_at: datetime.datetime`: When the job was started. Always has a
+  timezone set.
+
+- `status_message: str`: You can set this to an arbitrary message to report to
+  the outside world. This can be used e.g. by a debugger or admin interface to
+  show what the job is currently doing.
+
+- `progress: float | None`: A number between 0 and 1 indicating the progress of
+  the job. If `None`, the progress is indeterminate. This can be used to show a
+  progress bar in e.g. a an admin interface.

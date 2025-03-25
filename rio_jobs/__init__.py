@@ -27,7 +27,9 @@ P = t.ParamSpec("P")
 
 
 JobFunction: t.TypeAlias = t.Callable[
-    [],
+    [
+        "Run",
+    ],
     datetime
     | None
     | timedelta
@@ -95,6 +97,18 @@ async def _call_sync_or_async_function(
 class Run:
     """
     A past or current run of a job.
+
+    This object is passed to the job function as the first and only argument. It
+    contains information about this particular run of the job, such as the time
+    it started, the jobs progress and similar.
+
+    ## Attributes
+
+    `started_at`: When the job was started. Always has a timezone set.
+
+    `status_message`: Can be used to indicate what the run is currently doing.
+
+    `progress`: Can be used to indicate how far the run has progressed.
     """
 
     # When the job was started. Always has a timezone set.
@@ -102,55 +116,73 @@ class Run:
 
     # When the job was finished. Always has a timezone set. This is `None` if
     # the job is still running.
-    finished_at: datetime | None
+    _finished_at: datetime | None
+
+    # Can be used to indicate what the run is currently doing
+    status_message: str
+
+    # Can be used to indicate how far the run has progressed
+    progress: float | None
 
     # All messages logged to this run
-    log_messages: list[tuple[datetime, LogLevel, str]]
+    _log_messages: list[tuple[datetime, LogLevel, str]]
 
     # The result of the job, or, if the job failed, the raised exception. This
     # is `None` if the job is still running.
-    result: datetime | timedelta | t.Literal["never"] | None | BaseException
+    _result: datetime | timedelta | t.Literal["never"] | None | BaseException
 
     @property
-    def is_running(self) -> bool:
+    def _is_running(self) -> bool:
         """
         Whether the job is still running.
 
         Returns `True` if the job is still in progress and `False` otherwise.
         """
-        return self.finished_at is None
+        return self._finished_at is None
 
     @property
-    def has_succeeded(self) -> bool:
+    def _has_succeeded(self) -> bool:
         """
         Whether the job completed successfully.
 
         Returns `True` if the job has finished and did not raise an exception
         and `False` otherwise.
+
+        ## Metadata
+
+        `public`: False
         """
-        return self.finished_at is not None and not isinstance(
-            self.result, BaseException
+        return self._finished_at is not None and not isinstance(
+            self._result, BaseException
         )
 
     @property
-    def has_failed(self) -> bool:
+    def _has_failed(self) -> bool:
         """
         Whether the job has failed.
 
         Returns `True` if the job has finished and raised an exception and
         `False` otherwise.
-        """
-        return self.finished_at is not None and isinstance(self.result, BaseException)
 
-    def log(self, level: LogLevel, message: str) -> None:
+        ## Metadata
+
+        `public`: False
+        """
+        return self._finished_at is not None and isinstance(self._result, BaseException)
+
+    def _log(self, level: LogLevel, message: str) -> None:
         """
         Logs a message to the job's run.
 
         This is similar to `logging.log`, but the message is stored with the
         job's run. This allows you to inspect the log messages of a job after
         it has run.
+
+        ## Metadata
+
+        `public`: False
         """
-        self.log_messages.append(
+        self._log_messages.append(
             (
                 datetime.now(timezone.utc),
                 level,
@@ -158,55 +190,75 @@ class Run:
             )
         )
 
-    def debug(self, message: str) -> None:
+    def _debug(self, message: str) -> None:
         """
         Logs a debug message to the job's run.
 
         This is similar to `logging.debug`, but the message is stored with the
         job's run. This allows you to inspect the log messages of a job after
         it has run.
-        """
-        self.log("debug", message)
 
-    def info(self, message: str) -> None:
+        ## Metadata
+
+        `public`: False
+        """
+        self._log("debug", message)
+
+    def _info(self, message: str) -> None:
         """
         Logs an info message to the job's run.
 
         This is similar to `logging.info`, but the message is stored with the
         job's run. This allows you to inspect the log messages of a job after
         it has run.
-        """
-        self.log("info", message)
 
-    def warning(self, message: str) -> None:
+        ## Metadata
+
+        `public`: False
+        """
+        self._log("info", message)
+
+    def _warning(self, message: str) -> None:
         """
         Logs a warning message to the job's run.
 
         This is similar to `logging.warning`, but the message is stored with the
         job's run. This allows you to inspect the log messages of a job after
         it has run.
-        """
-        self.log("warning", message)
 
-    def error(self, message: str) -> None:
+        ## Metadata
+
+        `public`: False
+        """
+        self._log("warning", message)
+
+    def _error(self, message: str) -> None:
         """
         Logs an error message to the job's run.
 
         This is similar to `logging.error`, but the message is stored with the
         job's run. This allows you to inspect the log messages of a job after
         it has run.
-        """
-        self.log("error", message)
 
-    def critical(self, message: str) -> None:
+        ## Metadata
+
+        `public`: False
+        """
+        self._log("error", message)
+
+    def _critical(self, message: str) -> None:
         """
         Logs a critical message to the job's run.
 
         This is similar to `logging.critical`, but the message is stored with
         the job's run. This allows you to inspect the log messages of a job
         after it has run.
+
+        ## Metadata
+
+        `public`: False
         """
-        self.log("critical", message)
+        self._log("critical", message)
 
 
 @dataclasses.dataclass
@@ -308,11 +360,14 @@ class JobScheduler(rio.Extension):
         """
         Schedules a job to run periodically.
 
-        Schedules `job` to be called every `interval`. This function takes care
-        not to crash, even if the job fails. Exceptions are caught, logged and
-        the job will be scheduled again in the future. Runs are not overlapping,
-        meaning the next run will only start after the previous one has
-        finished, plus the configured interval.
+        Schedules `job` to be called every `interval`. The function will be
+        passed a `Run` object, which can be used to report the job's status and
+        progress.
+
+        This function takes care not to crash, even if the job fails. Exceptions
+        are caught, logged and the job will be scheduled again in the future.
+        Runs are not overlapping, meaning the next run will only start after the
+        previous one has finished, plus the configured interval.
 
         If `wait_for_initial_interval` is `True`, the job will wait for
         `interval` before being called for the first time. If `False`, it will
@@ -418,11 +473,14 @@ class JobScheduler(rio.Extension):
         """
         Schedules a job to run periodically.
 
-        Schedules `job` to be called every `interval`. This function takes care
-        not to crash, even if the job fails. Exceptions are caught, logged and
-        the job will be scheduled again in the future. Runs are not overlapping,
-        meaning the next run will only start after the previous one has
-        finished, plus the configured interval.
+        Schedules `job` to be called every `interval`. The function will be
+        passed a `Run` object, which can be used to report the job's status and
+        progress.
+
+        This function takes care not to crash, even if the job fails. Exceptions
+        are caught, logged and the job will be scheduled again in the future.
+        Runs are not overlapping, meaning the next run will only start after the
+        previous one has finished, plus the configured interval.
 
         If `wait_for_initial_interval` is `True`, the job will wait for
         `interval` before being called for the first time. If `False`, it will
@@ -713,18 +771,23 @@ class JobScheduler(rio.Extension):
 
             run = Run(
                 started_at=datetime.now(timezone.utc),
-                finished_at=None,
-                log_messages=[],
-                result=None,
+                _finished_at=None,
+                status_message="",
+                progress=None,
+                _log_messages=[],
+                _result=None,
             )
             job.past_runs.append(run)
 
             try:
-                result = await _call_sync_or_async_function(job.callback)
+                result = await _call_sync_or_async_function(
+                    job.callback,
+                    run,
+                )
 
             except asyncio.CancelledError as err:
                 job._next_run_at = "never"
-                run.result = err
+                run._result = err
 
                 _logger.debug(
                     f'Job "{job.name}" has been unscheduled due to cancellation. (Raised `asyncio.CancelledError`)'
@@ -733,10 +796,10 @@ class JobScheduler(rio.Extension):
 
             except Exception as err:
                 _logger.exception(f'Job "{job.name}" has crashed. Rescheduling.')
-                run.result = err
+                run._result = err
                 result = None
             else:
-                run.result = result
+                run._result = result
 
             # How long did the run take?
             finished_at = time.monotonic()
@@ -744,7 +807,7 @@ class JobScheduler(rio.Extension):
             _logger.debug(f'Job "{job.name}" has completed in {run_duration}.')
 
             # Update the run
-            run.finished_at = run.started_at + run_duration
+            run._finished_at = run.started_at + run_duration
 
             # Don't let the list of past runs get too long
             self._limit_past_runs_inplace(job.past_runs)

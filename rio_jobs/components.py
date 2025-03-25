@@ -5,6 +5,9 @@ import functools
 import rio_jobs
 
 
+ICON_SIZE = 2.5
+
+
 def _repr_timestamp(timestamp: datetime) -> str:
     now = datetime.now()
 
@@ -66,6 +69,44 @@ def _repr_duration(duration: timedelta) -> str:
     return " ".join(chunks)
 
 
+class ListItem(rio.Component):
+    main_text: str
+    secondary_text: str
+
+    progress: float
+
+    left_child: rio.Component
+    right_child: rio.Component | None = None
+
+    def build(self) -> rio.Component:
+        # Build the main column
+        main_column = rio.Column(
+            rio.Text(
+                self.main_text,
+                overflow="ellipsize",
+            ),
+            spacing=0.5,
+            grow_x=True,
+        )
+
+        if self.progress is not None:
+            main_column.add(rio.ProgressBar(self.progress))
+
+        main_column.add(rio.Text(self.secondary_text, style="dim"))
+
+        # Build the main row
+        main_row = rio.Row(
+            self.left_child,
+            main_column,
+            spacing=0.5,
+        )
+
+        if self.right_child is not None:
+            main_row.add(self.right_child)
+
+        return main_row
+
+
 class JobsView(rio.Component):
     """
     Displays the jobs of a scheduler.
@@ -88,7 +129,7 @@ class JobsView(rio.Component):
     async def _on_run_job_now(self, job: rio_jobs.ScheduledJob) -> None:
         # The UI may not be up-to-date with the actual state of the job. If the
         # job has started in the meantime, don't do anything.
-        if job.past_runs and job.past_runs[-1].is_running:
+        if job.past_runs and job.past_runs[-1]._is_running:
             self.force_refresh()
             return
 
@@ -135,30 +176,37 @@ class JobsView(rio.Component):
 
         for job in self.scheduler._job_objects:
             # If the job is running display when it started
-            if job.past_runs and job.past_runs[-1].is_running:
-                secondary_text = (
-                    f"Running since {_repr_timestamp(job.past_runs[-1].started_at)}"
-                )
-                left_child = rio.ProgressCircle(min_size=3)
-                right_child = None
+            time_text: str
+            status_message: str = ""
+
+            progress: float | None = None
+
+            left_child: rio.Component
+            right_child: rio.Component | None = None
+
+            if job.past_runs and job.past_runs[-1]._is_running:
+                run = job.past_runs[-1]
+                time_text = f"Running since {_repr_timestamp(run.started_at)}"
+                status_message = run.status_message
+
+                progress = run.progress
+
+                left_child = rio.ProgressCircle(min_size=ICON_SIZE)
+
             # Otherwise display the scheduled time and offer millennials to run
             # it right now
             else:
                 if isinstance(job._next_run_at, datetime):
-                    secondary_text = (
-                        f"Scheduled for {_repr_timestamp(job._next_run_at)}"
-                    )
+                    time_text = f"Scheduled for {_repr_timestamp(job._next_run_at)}"
                 else:
                     assert job._next_run_at == "never"
-                    secondary_text = (
-                        "This job has been unscheduled and will not run again"
-                    )
+                    time_text = "This job has been unscheduled and will not run again"
 
                 left_child = rio.Icon(
                     "material/schedule",
                     fill="dim",
-                    min_width=3,
-                    min_height=3,
+                    min_width=ICON_SIZE,
+                    min_height=ICON_SIZE,
                 )
 
                 right_child = rio.Tooltip(
@@ -170,10 +218,46 @@ class JobsView(rio.Component):
                     tip="Run Now",
                 )
 
+            # Build the main column
+            main_column = rio.Column(
+                rio.Markdown(job.name),
+                spacing=0.5,
+                grow_x=True,
+            )
+
+            if progressbar is not None:
+                main_column.add(progressbar)
+
+            if status_message.strip():
+                main_column.add(
+                    rio.Text(
+                        status_message,
+                        style="dim",
+                    )
+                )
+
+            main_column.add(
+                rio.Text(
+                    time_text,
+                    style="dim",
+                )
+            )
+
+            # Build the main row
+            main_row = rio.Row(
+                left_child,
+                main_column,
+                spacing=0.5,
+            )
+
+            if right_child is not None:
+                main_row.add(right_child)
+
             runs_list.add(
-                rio.SimpleListItem(
-                    text=job.name,
-                    secondary_text=secondary_text,
+                ListItem(
+                    main_text,
+                    time_text,
+                    progress=progress,
                     left_child=left_child,
                     right_child=right_child,
                     key=id(job),
@@ -238,33 +322,31 @@ class RunsView(rio.Component):
         runs_list = rio.ListView()
 
         for job, run in runs:
-            if run.is_running:
+            if run._is_running:
                 main_text = f"{job.name} is currently running"
                 finished_in_str = ""
-                left_child = rio.ProgressCircle(min_size=3)
-            elif run.has_succeeded:
-                assert run.finished_at is not None
+                left_child = rio.ProgressCircle(min_size=ICON_SIZE)
+            elif run._has_succeeded:
+                assert run._finished_at is not None
                 main_text = f"{job.name} has completed successfully"
                 finished_in_str = (
-                    f", finished in {_repr_duration(run.finished_at - run.started_at)}"
+                    f", finished in {_repr_duration(run._finished_at - run.started_at)}"
                 )
                 left_child = rio.Icon(
                     "material/check",
                     fill="success",
-                    min_width=3,
-                    min_height=3,
+                    min_width=ICON_SIZE,
+                    min_height=ICON_SIZE,
                 )
             else:
-                assert run.finished_at is not None
-                main_text = f"{job.name} has failed with {run.result!r}"
-                finished_in_str = (
-                    f", failed after {_repr_duration(run.finished_at - run.started_at)}"
-                )
+                assert run._finished_at is not None
+                main_text = f"{job.name} has failed with {run._result!r}"
+                finished_in_str = f", failed after {_repr_duration(run._finished_at - run.started_at)}"
                 left_child = rio.Icon(
                     "material/error",
                     fill="danger",
-                    min_width=3,
-                    min_height=3,
+                    min_width=ICON_SIZE,
+                    min_height=ICON_SIZE,
                 )
 
             runs_list.add(
@@ -277,4 +359,3 @@ class RunsView(rio.Component):
             )
 
         return runs_list
-
