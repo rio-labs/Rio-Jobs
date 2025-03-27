@@ -438,7 +438,7 @@ class JobScheduler(rio.Extension):
 
         # Get a name
         if name is None:
-            name = _get_function_name(job)
+            name = _get_function_name(job).replace("_", " ").title()
 
         # Add the job to the list of all jobs
         job_object = ScheduledJob(

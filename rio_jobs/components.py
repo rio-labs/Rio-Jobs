@@ -5,7 +5,7 @@ import functools
 import rio_jobs
 
 
-ICON_SIZE = 2.5
+ICON_SIZE = 2.2
 
 
 def _repr_timestamp(timestamp: datetime) -> str:
@@ -71,9 +71,10 @@ def _repr_duration(duration: timedelta) -> str:
 
 class ListItem(rio.Component):
     main_text: str
-    secondary_text: str
+    secondary_text: str | None
+    tertiary_text: str | None
 
-    progress: float
+    progress: float | None
 
     left_child: rio.Component
     right_child: rio.Component | None = None
@@ -85,20 +86,26 @@ class ListItem(rio.Component):
                 self.main_text,
                 overflow="ellipsize",
             ),
-            spacing=0.5,
+            spacing=0.3,
             grow_x=True,
+            align_y=0,
         )
 
         if self.progress is not None:
             main_column.add(rio.ProgressBar(self.progress))
 
-        main_column.add(rio.Text(self.secondary_text, style="dim"))
+        if self.secondary_text is not None:
+            main_column.add(rio.Text(self.secondary_text, style="dim"))
+
+        if self.tertiary_text is not None:
+            main_column.add(rio.Text(self.tertiary_text, style="dim"))
 
         # Build the main row
         main_row = rio.Row(
             self.left_child,
             main_column,
             spacing=0.5,
+            margin=0.5,
         )
 
         if self.right_child is not None:
@@ -171,10 +178,15 @@ class JobsView(rio.Component):
                 )
             )
 
+
         # Build a UI for the runs
         runs_list = rio.ListView()
+        sorted_jobs = sorted(
+            self.scheduler._job_objects,
+            key=lambda x: datetime.max if x._next_run_at == "never" else x._next_run_at,
+        )
 
-        for job in self.scheduler._job_objects:
+        for job in sorted_jobs:
             # If the job is running display when it started
             time_text: str
             status_message: str = ""
@@ -214,49 +226,18 @@ class JobsView(rio.Component):
                         "material/play_arrow:fill",
                         style="plain-text",
                         on_press=functools.partial(self._on_run_job_now, job),
+                        min_size=ICON_SIZE,
+                        align_y=0.5,
                     ),
                     tip="Run Now",
                 )
 
-            # Build the main column
-            main_column = rio.Column(
-                rio.Markdown(job.name),
-                spacing=0.5,
-                grow_x=True,
-            )
-
-            if progressbar is not None:
-                main_column.add(progressbar)
-
-            if status_message.strip():
-                main_column.add(
-                    rio.Text(
-                        status_message,
-                        style="dim",
-                    )
-                )
-
-            main_column.add(
-                rio.Text(
-                    time_text,
-                    style="dim",
-                )
-            )
-
-            # Build the main row
-            main_row = rio.Row(
-                left_child,
-                main_column,
-                spacing=0.5,
-            )
-
-            if right_child is not None:
-                main_row.add(right_child)
-
+            # Add a list item for the job
             runs_list.add(
                 ListItem(
-                    main_text,
-                    time_text,
+                    main_text=job.name,
+                    secondary_text=status_message,
+                    tertiary_text=time_text,
                     progress=progress,
                     left_child=left_child,
                     right_child=right_child,
