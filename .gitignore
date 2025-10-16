@@ -9,3 +9,6 @@ __pycache__
 
 # Editor Files
 /.vscode
+
+# AI assistants
+/.claude
