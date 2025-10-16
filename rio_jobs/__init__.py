@@ -34,7 +34,7 @@ JobFunction: t.TypeAlias = t.Callable[
     | None
     | timedelta
     | t.Literal["never"]
-    | t.Awaitable[None | datetime | timedelta | t.Literal["never"],],
+    | t.Awaitable[None | datetime | timedelta | t.Literal["never"]],
 ]
 
 J = t.TypeVar("J", bound=JobFunction)
@@ -109,10 +109,16 @@ class Run:
     `status_message`: Can be used to indicate what the run is currently doing.
 
     `progress`: Can be used to indicate how far the run has progressed.
+
+    `app`: The Rio app. This can be used to access app-level state, extensions,
+        and configuration.
     """
 
     # When the job was started. Always has a timezone set.
     started_at: datetime
+
+    # The Rio app instance
+    app: rio.App
 
     # When the job was finished. Always has a timezone set. This is `None` if
     # the job is still running.
@@ -337,6 +343,9 @@ class JobScheduler(rio.Extension):
         # Chain up
         super().__init__()
 
+        # The Rio app will be stored here once the app starts
+        self._app: rio.App | None = None
+
         # These control for how long past runs are kept, so they can be
         # inspected e.g. in an admin interface.
         self._keep_past_runs_for = keep_past_runs_for
@@ -539,12 +548,14 @@ class JobScheduler(rio.Extension):
     @rio.extension_event.on_app_start
     async def _on_app_start(
         self,
-        _: rio.extension_event.ExtensionAppStartEvent,
+        event: rio.extension_event.ExtensionAppStartEvent,
     ) -> None:
         """
         Schedule all jobs when the app starts.
         """
-        revel.debug("On app start")
+        # Store the app reference so we can pass it to job runs
+        self._app = event.app
+
         assert not self._is_running, (
             "Called on app start, but the extension is already running!?"
         )
@@ -582,29 +593,33 @@ class JobScheduler(rio.Extension):
         # Sort the soft-start jobs by when they'll first run
         soft_start_jobs.sort(key=lambda x: x[1])
 
-        # Start the first job immediately
-        first_job, prev_job_start_time = soft_start_jobs[0]
-
-        self._create_asyncio_task_for_job(
-            first_job,
-            run_at=prev_job_start_time,
-        )
-
-        # Ensure a minimum spacing between the remainder
-        for ii in range(1, len(soft_start_jobs)):
-            cur_job, cur_job_start_time = soft_start_jobs[ii]
-
-            cur_job_start_time = max(
-                cur_job_start_time,
-                prev_job_start_time + timedelta(seconds=30),
-            )
-
-            prev_job_start_time = cur_job_start_time
-
+        # Queue the soft-start jobs
+        try:
+            first_job, prev_job_start_time = soft_start_jobs[0]
+        except IndexError:
+            pass
+        else:
+            # Start the first job immediately
             self._create_asyncio_task_for_job(
-                cur_job,
-                run_at=cur_job_start_time,
+                first_job,
+                run_at=prev_job_start_time,
             )
+
+            # Ensure a minimum spacing between the remainder
+            for ii in range(1, len(soft_start_jobs)):
+                cur_job, cur_job_start_time = soft_start_jobs[ii]
+
+                cur_job_start_time = max(
+                    cur_job_start_time,
+                    prev_job_start_time + timedelta(seconds=30),
+                )
+
+                prev_job_start_time = cur_job_start_time
+
+                self._create_asyncio_task_for_job(
+                    cur_job,
+                    run_at=cur_job_start_time,
+                )
 
         # Done
         for job in self._job_objects:
@@ -618,8 +633,6 @@ class JobScheduler(rio.Extension):
         """
         Shut down all jobs when the app closes.
         """
-        revel.debug("On app close 1")
-
         # Cancel all jobs
         for job in self._job_objects:
             if job._task is not None:
@@ -630,7 +643,6 @@ class JobScheduler(rio.Extension):
             *[job._task for job in self._job_objects if job._task is not None],
             return_exceptions=True,
         )
-        revel.debug("On app close 2")
 
     def _create_asyncio_task_for_job(
         self,
@@ -758,6 +770,7 @@ class JobScheduler(rio.Extension):
         """
         Wrapper that handles the safe running of a job.
         """
+        assert self._app is not None
         assert isinstance(job._next_run_at, datetime), job._next_run_at
 
         while True:
@@ -771,6 +784,7 @@ class JobScheduler(rio.Extension):
 
             run = Run(
                 started_at=datetime.now(timezone.utc),
+                app=self._app,
                 _finished_at=None,
                 status_message="",
                 progress=None,
