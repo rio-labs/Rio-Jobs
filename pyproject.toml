@@ -1,6 +1,6 @@
 [project]
 name = "rio-jobs"
-version = "0.3.1"
+version = "0.3.2"
 description = "A job scheduler for the Rio pure Python web framework"
 readme = "README.md"
 requires-python = ">=3.10"
